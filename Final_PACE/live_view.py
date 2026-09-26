@@ -111,10 +111,10 @@ def main():
 
     # --- Panel A: 3D structure + velocity ---
     wall = c_now[lso == 0]
-    wall_ds = wall[:: max(len(wall) // 1500, 1)]
+    wall_ds = wall[:: max(len(wall) // 2500, 1)]
     ax3d.scatter(
         wall_ds[:, 0], wall_ds[:, 1], wall_ds[:, 2],
-        s=3, c="gray", alpha=0.25, label="vessel wall",
+        s=10, c="dimgray", alpha=0.6, depthshade=False, label="vessel wall",
     )
 
     valve_mask = lso != 0
