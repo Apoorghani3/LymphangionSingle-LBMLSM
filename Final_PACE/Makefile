@@ -13,11 +13,11 @@ OBJ = 	$(SRC:.cpp=.o)
 
 # System-specific settings
 
-CC = 		icpc
-CCFLAGS =	-w -ipo -O3 -no-prec-div -fp-model fast=2 -qopenmp
+CC = 		g++
+CCFLAGS =	-w -fpermissive -O3 -fopenmp
 DEPFLAGS =	-M
-LINK =		icpc
-LINKFLAGS =	-ipo -O3 -no-prec-div -fp-model fast=2 -qopenmp
+LINK =		g++
+LINKFLAGS =	-O3 -fopenmp
 USRLIB =	
 SYSLIB =	
 SIZE =		size
