@@ -1,19 +1,31 @@
 #!/usr/bin/env python3
-"""Live viewer for the LBLS solver's results/N dumps.
+"""Live multipanel viewer for the LBLS solver's results/N dumps.
 
-Reads the block-format text dumps (clArray3D::save2file(): nX blocks of
-nY rows x nZ cols, blank-line separated; vector fields have nZ*3 cols
-laid out as x0,y0,z0,x1,y1,z1,...) and renders a Y-midplane slice of
-density plus in-plane velocity vectors, matching the combined view
-LivePostProcessor.m used to produce.
+Panel A (3D): vessel wall + valve/leaflet structure (colored by radial
+deformation from t=0) with a coarse 3D fluid-velocity quiver overlay.
+Panel B: inlet vs outlet mass flow rate over time (mass-flux balance
+across the lymphangion, from the solver's own tout.txt diagnostic log).
+Panel C: compressibility indicator over time (max / mean-abs density
+deviation from the reference density — this solver is a weakly
+compressible LBM, so density deviation is the direct compressibility
+signal).
 """
+import os
 import sys
 import glob
-import os
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
+
+
+def load_flat(path):
+    vals = []
+    with open(path) as f:
+        for line in f:
+            vals.extend(float(x) for x in line.split())
+    return np.array(vals)
 
 
 def load_scalar_block(path, nX, nY, nZ):
@@ -45,107 +57,131 @@ def load_vector_block(path, nX, nY, nZ):
     return arr
 
 
-def load_structure_positions(path):
-    vals = []
-    with open(path) as f:
-        for line in f:
-            vals.extend(float(x) for x in line.split())
-    vals = np.array(vals).reshape(-1, 3)
-    return vals
-
-
 def latest_dump_dir(base="results"):
     dirs = [d for d in glob.glob(os.path.join(base, "*")) if os.path.isdir(d)]
-    nums = []
-    for d in dirs:
-        b = os.path.basename(d)
-        if b.isdigit():
-            nums.append((int(b), d))
+    nums = [(int(os.path.basename(d)), d) for d in dirs if os.path.basename(d).isdigit()]
     if not nums:
         return None, None
     nums.sort()
     return nums[-1]
 
 
+def load_tout(path="tout.txt"):
+    """Columns: Time, mass, NM.S, Qavgl, Qavgm, Qavgh, avgl, avgm, avgh, Ro.max, Ro.avgabs, [LS...]"""
+    rows = []
+    if not os.path.exists(path):
+        return None
+    with open(path) as f:
+        for line in f:
+            parts = line.split()
+            if len(parts) < 11:
+                continue
+            rows.append([float(x) for x in parts[:11]])
+    if not rows:
+        return None
+    return np.array(rows)
+
+
 def main():
-    with open("load/lbsize.txt") as f:
-        nX, nY, nZ = (int(float(x)) for x in f.read().split())
+    nX, nY, nZ = (int(float(x)) for x in load_flat("load/lbsize.txt"))
 
     dump_num, dump_dir = latest_dump_dir()
     if dump_dir is None:
         print("No dumps yet.")
         sys.exit(1)
-
     print(f"Rendering dump {dump_num} from {dump_dir}")
 
-    ro = load_scalar_block(os.path.join(dump_dir, "lbro.txt"), nX, nY, nZ)
+    lso = load_flat("load/lso.txt")
+    N = len(lso)
+    c0 = load_flat("load/lsc.txt").reshape(N, 3)
+    c_now = load_flat(os.path.join(dump_dir, "lsc.txt")).reshape(N, 3)
+
+    midY, midZ = (nY - 1) / 2.0, (nZ - 1) / 2.0
+    r0 = np.sqrt((c0[:, 1] - midY) ** 2 + (c0[:, 2] - midZ) ** 2)
+    r_now = np.sqrt((c_now[:, 1] - midY) ** 2 + (c_now[:, 2] - midZ) ** 2)
+    dr = r_now - r0
+
     j = load_vector_block(os.path.join(dump_dir, "lbj.txt"), nX, nY, nZ)
 
-    midY = nY // 2
-    ro_slice = ro[:, midY, :].T  # shape (nZ, nX)
-    jx_slice = j[:, midY, :, 0].T
-    jz_slice = j[:, midY, :, 2].T
+    fig = plt.figure(figsize=(16, 9))
+    gs = fig.add_gridspec(2, 2, width_ratios=[1.4, 1], hspace=0.32, wspace=0.28)
+    ax3d = fig.add_subplot(gs[:, 0], projection="3d")
+    ax_flow = fig.add_subplot(gs[0, 1])
+    ax_comp = fig.add_subplot(gs[1, 1])
 
-    fig, ax = plt.subplots(figsize=(12, 4))
-    vmax = np.max(np.abs(ro_slice)) or 1e-12
-    im = ax.imshow(
-        ro_slice,
-        origin="lower",
-        extent=[0, nX, 0, nZ],
-        aspect="auto",
-        cmap="RdBu_r",
-        vmin=-vmax,
-        vmax=vmax,
+    # --- Panel A: 3D structure + velocity ---
+    wall = c_now[lso == 0]
+    wall_ds = wall[:: max(len(wall) // 1500, 1)]
+    ax3d.scatter(
+        wall_ds[:, 0], wall_ds[:, 1], wall_ds[:, 2],
+        s=3, c="gray", alpha=0.25, label="vessel wall",
     )
-    cbar = fig.colorbar(im, ax=ax, pad=0.01)
-    cbar.set_label("density deviation")
 
-    step_x = max(nX // 40, 1)
-    step_z = max(nZ // 20, 1)
-    Xg, Zg = np.meshgrid(
-        np.arange(0, nX, step_x) + 0.5, np.arange(0, nZ, step_z) + 0.5
+    valve_mask = lso != 0
+    valve = c_now[valve_mask]
+    valve_dr = dr[valve_mask]
+    vmax = max(np.max(np.abs(valve_dr)), 1e-9)
+    sc = ax3d.scatter(
+        valve[:, 0], valve[:, 1], valve[:, 2],
+        s=8, c=valve_dr, cmap="coolwarm", vmin=-vmax, vmax=vmax,
+        label="valve/leaflet (color = radial deformation)",
     )
-    U = jx_slice[::step_z, ::step_x]
-    W = jz_slice[::step_z, ::step_x]
-    speed = np.sqrt(U**2 + W**2)
+    cbar = fig.colorbar(sc, ax=ax3d, pad=0.08, shrink=0.6)
+    cbar.set_label("leaflet Δr from t=0")
+
+    sx, sy, sz = max(nX // 18, 1), max(nY // 6, 1), max(nZ // 6, 1)
+    Xg, Yg, Zg = np.meshgrid(
+        np.arange(0, nX, sx), np.arange(0, nY, sy), np.arange(0, nZ, sz), indexing="ij"
+    )
+    U = j[::sx, ::sy, ::sz, 0]
+    V = j[::sx, ::sy, ::sz, 1]
+    W = j[::sx, ::sy, ::sz, 2]
+    speed = np.sqrt(U**2 + V**2 + W**2)
     if speed.max() > 0:
-        ax.quiver(Xg, Zg, U, W, color="k", scale=speed.max() * 25, width=0.002)
-
-    try:
-        lsc = load_structure_positions(os.path.join(dump_dir, "lsc.txt"))
-        lso = np.loadtxt("load/lso.txt")
-        wall_mask = lso == 0
-        wall = lsc[wall_mask]
-        near_mid = np.abs(wall[:, 1] - midY) < 1.5
-        ax.scatter(
-            wall[near_mid, 0],
-            wall[near_mid, 2],
-            s=2,
-            c="gray",
-            alpha=0.5,
-            label="vessel wall",
+        ax3d.quiver(
+            Xg, Yg, Zg, U, V, W,
+            length=6.0 / speed.max(), normalize=False, color="k", alpha=0.6, linewidth=0.6,
         )
-        valve_mask = ~wall_mask
-        valve = lsc[valve_mask]
-        near_mid_v = np.abs(valve[:, 1] - midY) < 1.5
-        ax.scatter(
-            valve[near_mid_v, 0],
-            valve[near_mid_v, 2],
-            s=4,
-            c="magenta",
-            label="valve/leaflet",
-        )
-        ax.legend(loc="upper right", fontsize=8)
-    except Exception as e:
-        print("structure overlay skipped:", e)
 
-    ax.set_xlabel("X (lattice units)")
-    ax.set_ylabel("Z (lattice units)")
-    ax.set_title(f"Lymphangion LBM/LSM — dump {dump_num} (Y-midplane slice)")
+    ax3d.set_xlabel("X")
+    ax3d.set_ylabel("Y")
+    ax3d.set_zlabel("Z")
+    ax3d.set_box_aspect((nX / nY, 1, 1))
+    ax3d.set_title(f"Dump {dump_num} — structure deformation + flow field")
+    ax3d.legend(loc="upper left", fontsize=7)
 
+    # --- Panels B/C: inlet/outlet mass flow + compressibility over time ---
+    tout = load_tout()
+    if tout is not None:
+        t = tout[:, 0]
+        avgl, avgm, avgh = tout[:, 6], tout[:, 7], tout[:, 8]
+        ro_max, ro_avgabs = tout[:, 9], tout[:, 10]
+
+        ax_flow.plot(t, avgl, label="inlet (low X)", color="tab:blue")
+        ax_flow.plot(t, avgm, label="mid X", color="gray", linestyle="--", linewidth=1)
+        ax_flow.plot(t, avgh, label="outlet (high X)", color="tab:red")
+        ax_flow.axhline(0, color="k", linewidth=0.5)
+        ax_flow.set_ylabel("mass flow rate")
+        ax_flow.set_title("Inlet vs outlet mass flow rate")
+        ax_flow.legend(fontsize=8, loc="best")
+        ax_flow.grid(alpha=0.3)
+
+        ax_comp.plot(t, ro_max, label="max |Δρ| (peak compressibility)", color="tab:purple")
+        ax_comp.plot(t, ro_avgabs, label="mean |Δρ|", color="tab:orange")
+        ax_comp.set_xlabel("simulation time (lattice steps)")
+        ax_comp.set_ylabel("density deviation")
+        ax_comp.set_title("Compressibility (density deviation from ρ₀)")
+        ax_comp.legend(fontsize=8, loc="best")
+        ax_comp.grid(alpha=0.3)
+    else:
+        for ax, msg in [(ax_flow, "tout.txt not found"), (ax_comp, "tout.txt not found")]:
+            ax.text(0.5, 0.5, msg, ha="center", va="center", transform=ax.transAxes)
+
+    fig.suptitle(
+        f"Lymphangion LBM/LSM — dump {dump_num}", fontsize=13, fontweight="bold"
+    )
     out_path = "live_view_latest.png"
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=150)
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"Saved {out_path}")
 
