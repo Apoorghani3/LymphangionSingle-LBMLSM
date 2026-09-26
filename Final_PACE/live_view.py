@@ -112,7 +112,7 @@ def main():
         ax.quiver(Xg, Zg, U, W, color="k", scale=speed.max() * 25, width=0.002)
 
     try:
-        lsc = load_structure_positions("load/lsc.txt")
+        lsc = load_structure_positions(os.path.join(dump_dir, "lsc.txt"))
         lso = np.loadtxt("load/lso.txt")
         wall_mask = lso == 0
         wall = lsc[wall_mask]
